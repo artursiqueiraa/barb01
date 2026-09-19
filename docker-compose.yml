@@ -1,0 +1,15 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: barb
+      POSTGRES_PASSWORD: barb
+      POSTGRES_DB: barb
+    ports:
+      - "5433:5432"
+    volumes:
+      - barb_pgdata:/var/lib/postgresql/data
+
+volumes:
+  barb_pgdata:

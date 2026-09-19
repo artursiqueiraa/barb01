@@ -1,0 +1,330 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Enums ----------
+
+enum Role {
+  ADMIN
+  GERENTE
+  RECEPCAO
+  BARBEIRO
+  CLIENTE
+}
+
+enum BillingPeriod {
+  MONTHLY
+  YEARLY
+}
+
+enum SubscriptionStatus {
+  PENDING
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  EXPIRED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+  CANCELLED
+}
+
+enum PaymentType {
+  CASH
+  PIX
+  CARD
+  SUBSCRIPTION
+  OTHER
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+// ---------- Models ----------
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(CLIENTE)
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  customerId String?   @unique
+  customer   Customer? @relation(fields: [customerId], references: [id])
+
+  barberId String? @unique
+  barber   Barber? @relation(fields: [barberId], references: [id])
+
+  auditLogs AuditLog[]
+
+  @@map("users")
+}
+
+model Customer {
+  id        String    @id @default(cuid())
+  name      String
+  cpf       String    @unique
+  phone     String
+  email     String?
+  birthDate DateTime?
+  notes     String?
+  active    Boolean   @default(true)
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  user          User?
+  subscriptions Subscription[]
+  payments      Payment[]
+  attendances   Attendance[]
+  appointments  Appointment[]
+
+  @@index([cpf])
+  @@index([phone])
+  @@map("customers")
+}
+
+model Barber {
+  id                          String    @id @default(cuid())
+  name                        String
+  phone                       String?
+  email                       String?
+  photo                       String?
+  defaultCommissionPercentage Decimal   @default(50) @db.Decimal(5, 2)
+  active                      Boolean   @default(true)
+  deletedAt                   DateTime?
+  createdAt                   DateTime  @default(now())
+  updatedAt                   DateTime  @updatedAt
+
+  user            User?
+  commissionRules CommissionRule[]
+  attendances     Attendance[]
+  appointments    Appointment[]
+
+  @@map("barbers")
+}
+
+model Service {
+  id              String    @id @default(cuid())
+  name            String
+  description     String?
+  price           Decimal   @db.Decimal(10, 2)
+  durationMinutes Int
+  active          Boolean   @default(true)
+  deletedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  commissionRules CommissionRule[]
+  attendances     Attendance[]
+  appointments    Appointment[]
+
+  @@map("services")
+}
+
+model CommissionRule {
+  id         String   @id @default(cuid())
+  barberId   String
+  serviceId  String
+  percentage Decimal  @db.Decimal(5, 2)
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  barber  Barber  @relation(fields: [barberId], references: [id])
+  service Service @relation(fields: [serviceId], references: [id])
+
+  @@unique([barberId, serviceId])
+  @@map("commission_rules")
+}
+
+model Plan {
+  id            String        @id @default(cuid())
+  name          String
+  description   String?
+  price         Decimal       @db.Decimal(10, 2)
+  billingPeriod BillingPeriod @default(MONTHLY)
+  active        Boolean       @default(true)
+  deletedAt     DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  subscriptions Subscription[]
+
+  @@map("plans")
+}
+
+model Subscription {
+  id                     String             @id @default(cuid())
+  customerId             String
+  planId                 String
+  status                 SubscriptionStatus @default(PENDING)
+  price                  Decimal            @db.Decimal(10, 2)
+  startedAt              DateTime?
+  currentPeriodStart     DateTime?
+  currentPeriodEnd       DateTime?
+  cancelledAt            DateTime?
+  externalSubscriptionId String?            @unique
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+
+  customer      Customer                    @relation(fields: [customerId], references: [id])
+  plan          Plan                        @relation(fields: [planId], references: [id])
+  payments      Payment[]
+  attendances   Attendance[]
+  statusHistory SubscriptionStatusHistory[]
+
+  @@index([customerId])
+  @@index([status])
+  @@map("subscriptions")
+}
+
+model Payment {
+  id                String        @id @default(cuid())
+  customerId        String
+  subscriptionId    String?
+  amount            Decimal       @db.Decimal(10, 2)
+  status            PaymentStatus @default(PENDING)
+  paymentType       PaymentType
+  externalPaymentId String?       @unique
+  paidAt            DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  customer     Customer      @relation(fields: [customerId], references: [id])
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  @@index([customerId])
+  @@index([subscriptionId])
+  @@map("payments")
+}
+
+/// Histórico de mudanças de status de uma assinatura — nunca sobrescrever o
+/// status sem deixar rastro de por que mudou (seção "HISTÓRICO DE STATUS").
+model SubscriptionStatusHistory {
+  id             String              @id @default(cuid())
+  subscriptionId String
+  fromStatus     SubscriptionStatus?
+  toStatus       SubscriptionStatus
+  reason         String?
+  createdAt      DateTime            @default(now())
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id])
+
+  @@index([subscriptionId])
+  @@map("subscription_status_history")
+}
+
+/// Registro de eventos externos (webhook) para garantir idempotência: o mesmo
+/// evento do gateway nunca é processado duas vezes.
+model PaymentEvent {
+  id              String    @id @default(cuid())
+  provider        String
+  externalEventId String
+  eventType       String
+  payloadHash     String
+  processedAt     DateTime?
+  createdAt       DateTime  @default(now())
+
+  @@unique([provider, externalEventId])
+  @@map("payment_events")
+}
+
+model Attendance {
+  id                   String      @id @default(cuid())
+  customerId           String
+  barberId             String
+  serviceId            String
+  subscriptionId       String?
+  priceReference       Decimal     @db.Decimal(10, 2)
+  commissionPercentage Decimal     @db.Decimal(5, 2)
+  commissionValue      Decimal     @db.Decimal(10, 2)
+  paymentType          PaymentType
+  notes                String?
+  createdAt            DateTime    @default(now())
+
+  customer     Customer      @relation(fields: [customerId], references: [id])
+  barber       Barber        @relation(fields: [barberId], references: [id])
+  service      Service       @relation(fields: [serviceId], references: [id])
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  @@index([customerId])
+  @@index([barberId])
+  @@index([serviceId])
+  @@index([createdAt])
+  @@map("attendances")
+}
+
+model Appointment {
+  id         String            @id @default(cuid())
+  customerId String
+  barberId   String
+  serviceId  String
+  startAt    DateTime
+  endAt      DateTime
+  status     AppointmentStatus @default(PENDING)
+  notes      String?
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+
+  customer Customer @relation(fields: [customerId], references: [id])
+  barber   Barber   @relation(fields: [barberId], references: [id])
+  service  Service  @relation(fields: [serviceId], references: [id])
+
+  @@unique([barberId, startAt])
+  @@index([customerId])
+  @@index([startAt])
+  @@map("appointments")
+}
+
+model BusinessSetting {
+  id                      String   @id @default("default")
+  name                    String   @default("Barbearia")
+  logoUrl                 String?
+  phone                   String?
+  whatsapp                String?
+  instagram               String?
+  address                 String?
+  googleMapsUrl           String?
+  openingHours            Json?
+  whatsappMessageTemplate String   @default("Olá, {{customerName}}! Seu atendimento foi solicitado.\nServiço: {{serviceName}}\nBarbeiro: {{barberName}}\nData: {{date}}\nHorário: {{time}}")
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  @@map("business_settings")
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  action    String
+  entity    String
+  entityId  String
+  metadata  Json?
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([entity, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
