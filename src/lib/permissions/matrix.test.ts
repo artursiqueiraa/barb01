@@ -22,6 +22,13 @@ describe("RBAC matrix", () => {
     expect(can("BARBEIRO", "attendances", "read")).toBe(true);
   });
 
+  it("BARBEIRO pode informar atraso (update) mas não criar/excluir agendamento (escopo 'próprio' é checado na action)", () => {
+    expect(can("BARBEIRO", "appointments", "read")).toBe(true);
+    expect(can("BARBEIRO", "appointments", "update")).toBe(true);
+    expect(can("BARBEIRO", "appointments", "create")).toBe(false);
+    expect(can("BARBEIRO", "appointments", "delete")).toBe(false);
+  });
+
   it("GERENTE não pode alterar configurações críticas nem ver auditoria", () => {
     expect(can("GERENTE", "settings", "update")).toBe(false);
     expect(can("GERENTE", "audit", "read")).toBe(false);

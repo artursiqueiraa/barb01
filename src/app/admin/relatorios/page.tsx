@@ -21,10 +21,11 @@ export default async function ReportsPage({
     to: to ? new Date(`${to}T23:59:59`) : undefined,
   };
 
-  const [production, byService, financial] = await Promise.all([
+  const [production, byService, financial, delays] = await Promise.all([
     reportsService.production(filters),
     reportsService.byService(filters),
     reportsService.financialSummary(filters),
+    reportsService.delays(filters),
   ]);
 
   const withAttendances = production.filter((p) => p.totalAttendances > 0);
@@ -116,6 +117,36 @@ export default async function ReportsPage({
                 <Tr key={service.serviceName}>
                   <Td>{service.serviceName}</Td>
                   <Td>{service.count}</Td>
+                </Tr>
+              ))}
+            </Tbody>
+          </Table>
+        )}
+      </div>
+
+      <div>
+        <h2 className="mb-3 text-sm font-semibold text-zinc-700">Atrasos</h2>
+        {delays.length === 0 ? (
+          <EmptyState title="Nenhum atraso registrado no período selecionado" />
+        ) : (
+          <Table>
+            <Thead>
+              <Tr>
+                <Th>Barbeiro</Th>
+                <Th>Atrasos</Th>
+                <Th>Total (min)</Th>
+                <Th>Média (min)</Th>
+                <Th>Clientes afetados</Th>
+              </Tr>
+            </Thead>
+            <Tbody>
+              {delays.map((delay) => (
+                <Tr key={delay.barberId}>
+                  <Td>{delay.barberName}</Td>
+                  <Td>{delay.count}</Td>
+                  <Td>{delay.totalMinutes}</Td>
+                  <Td>{delay.averageMinutes}</Td>
+                  <Td>{delay.affectedCustomers}</Td>
                 </Tr>
               ))}
             </Tbody>

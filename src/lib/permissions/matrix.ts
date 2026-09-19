@@ -72,7 +72,9 @@ const matrix: PermissionMatrix = {
   BARBEIRO: {
     // "own only": filtrado por barberId da sessão na camada de repository.
     attendances: ["create", "read"],
-    appointments: ["read"],
+    // "update" cobre só "informar atraso" no próprio agendamento — a checagem
+    // de ownership (barberId da sessão) é feita em modules/appointments/actions.ts.
+    appointments: ["read", "update"],
     reports: ["read"],
     customers: ["read"],
     barbers: ["read"],
