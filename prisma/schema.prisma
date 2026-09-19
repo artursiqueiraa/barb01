@@ -54,6 +54,13 @@ enum AppointmentStatus {
   NO_SHOW
 }
 
+enum AnticipationStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  CANCELLED
+}
+
 // ---------- Models ----------
 
 model User {
@@ -291,6 +298,13 @@ model Appointment {
   originalEndAt   DateTime?
   delayMinutes    Int       @default(0)
 
+  // Solicitação de antecipação (Etapa 6.1): o cliente apenas MANIFESTA
+  // interesse em ocupar um horário liberado; nada muda até o barbeiro
+  // decidir (accept/reject). Cada solicitação pertence a este próprio
+  // agendamento — não existe entidade "solicitação" separada.
+  anticipationRequestedStartAt DateTime?
+  anticipationStatus           AnticipationStatus?
+
   createdAt  DateTime          @default(now())
   updatedAt  DateTime          @updatedAt
 
@@ -298,7 +312,14 @@ model Appointment {
   barber   Barber   @relation(fields: [barberId], references: [id])
   service  Service  @relation(fields: [serviceId], references: [id])
 
-  @@unique([barberId, startAt])
+  // NOTA: a unicidade real de horário (barberId+startAt) é aplicada por um
+  // índice único PARCIAL, criado via SQL bruto na migration
+  // `add_appointment_anticipation` (`WHERE status IN ('PENDING','CONFIRMED')`),
+  // não por um `@@unique` declarativo aqui — o Prisma ainda não expressa
+  // índice parcial na DSL do schema. Um `@@unique([barberId, startAt])` sem
+  // filtro bloquearia reaproveitar o horário exato de um agendamento
+  // CANCELLED, quebrando a antecipação. Ver docs/migrations e o histórico de
+  // migrations para o SQL exato.
   @@index([customerId])
   @@index([startAt])
   @@map("appointments")

@@ -13,12 +13,24 @@ import { appointmentsService } from "./service";
 
 export type AppointmentActionState = { success: boolean; error?: string };
 
-/** BARBEIRO só pode agir sobre os próprios agendamentos — nunca confiar no client para decidir isso. */
-async function assertCanActOnAppointment(session: { user: { role: Role; barberId?: string | null } }, appointmentId: string) {
-  if (session.user.role !== "BARBEIRO") return;
+/**
+ * BARBEIRO só pode agir sobre os próprios agendamentos, CLIENTE só sobre os
+ * próprios — nunca confiar no client para decidir isso. ADMIN/GERENTE/
+ * RECEPCAO mantêm o acesso amplo que já tinham (nenhuma restrição extra).
+ */
+async function assertCanActOnAppointment(
+  session: { user: { role: Role; barberId?: string | null; customerId?: string | null } },
+  appointmentId: string,
+) {
+  if (session.user.role !== "BARBEIRO" && session.user.role !== "CLIENTE") return;
+
   const appointment = await appointmentsRepository.findById(appointmentId);
   if (!appointment) throw new NotFoundError("Agendamento");
-  if (appointment.barberId !== session.user.barberId) {
+
+  if (session.user.role === "BARBEIRO" && appointment.barberId !== session.user.barberId) {
+    throw new DomainError("Você só pode gerenciar os próprios agendamentos");
+  }
+  if (session.user.role === "CLIENTE" && appointment.customerId !== session.user.customerId) {
     throw new DomainError("Você só pode gerenciar os próprios agendamentos");
   }
 }
@@ -52,6 +64,10 @@ export async function cancelAppointmentAction(appointmentId: string): Promise<vo
   const session = await requirePermission("appointments", "update");
   await assertCanActOnAppointment(session, appointmentId);
 
+  // Busca antes de cancelar só para enriquecer a auditoria (quem/quando já
+  // vêm do próprio recordAuditLog; aqui registramos o que foi cancelado).
+  const appointment = await appointmentsRepository.findById(appointmentId);
+
   await appointmentsService.cancel(appointmentId);
 
   await recordAuditLog({
@@ -59,9 +75,20 @@ export async function cancelAppointmentAction(appointmentId: string): Promise<vo
     action: "CANCEL",
     entity: "Appointment",
     entityId: appointmentId,
+    metadata: appointment
+      ? {
+          cancelledByRole: session.user.role,
+          customerId: appointment.customerId,
+          customerName: appointment.customer.name,
+          barberId: appointment.barberId,
+          startAt: appointment.startAt.toISOString(),
+          endAt: appointment.endAt.toISOString(),
+        }
+      : undefined,
   });
 
   revalidatePath("/admin/agendamentos");
+  revalidatePath("/perfil");
 }
 
 export type DelaySimulationDTO = {
@@ -156,5 +183,90 @@ export async function applyDelayAction(
     };
   } catch (error) {
     return { ok: false, error: toActionErrorMessage(error) };
+  }
+}
+
+export type SimpleActionResult = { success: boolean; error?: string };
+
+/**
+ * O cliente MANIFESTA interesse em antecipar o próprio agendamento — isso
+ * nunca altera o horário. Só o barbeiro decide (accept/reject).
+ */
+export async function requestAnticipationAction(appointmentId: string): Promise<SimpleActionResult> {
+  const session = await requirePermission("appointments", "update");
+
+  try {
+    if (session.user.role !== "CLIENTE" || !session.user.customerId) {
+      throw new DomainError("Apenas o cliente pode solicitar antecipação do próprio agendamento");
+    }
+    await assertCanActOnAppointment(session, appointmentId);
+
+    const result = await appointmentsService.requestAnticipation(appointmentId, { customerId: session.user.customerId });
+
+    await recordAuditLog({
+      userId: session.user.id,
+      action: "SOLICITACAO_ANTECIPACAO",
+      entity: "Appointment",
+      entityId: appointmentId,
+      metadata: {
+        barberId: result.barberId,
+        customerId: session.user.customerId,
+        customerName: result.customerName,
+        currentStartAt: result.currentStartAt.toISOString(),
+        currentEndAt: result.currentEndAt.toISOString(),
+        requestedStartAt: result.requestedStartAt.toISOString(),
+        requestedEndAt: result.requestedEndAt.toISOString(),
+      },
+    });
+
+    revalidatePath("/perfil");
+    revalidatePath("/admin/agendamentos");
+
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: toActionErrorMessage(error) };
+  }
+}
+
+export type AnticipationDecisionResult = {
+  success: boolean;
+  error?: string;
+  notification?: { message: string; whatsappLink: string };
+};
+
+/** Barbeiro aceita a solicitação: só agora o horário muda de fato (transacional). */
+export async function acceptAnticipationAction(appointmentId: string): Promise<AnticipationDecisionResult> {
+  const session = await requirePermission("appointments", "update");
+
+  try {
+    await assertCanActOnAppointment(session, appointmentId);
+
+    const result = await appointmentsService.acceptAnticipation(appointmentId, { userId: session.user.id });
+
+    revalidatePath("/admin/agendamentos");
+    revalidatePath("/admin/relatorios");
+    revalidatePath("/perfil");
+
+    return { success: true, notification: { message: result.notification.message, whatsappLink: result.notification.whatsappLink } };
+  } catch (error) {
+    return { success: false, error: toActionErrorMessage(error) };
+  }
+}
+
+/** Barbeiro recusa: mantém o horário original, só registra a decisão e avisa o cliente. */
+export async function rejectAnticipationAction(appointmentId: string): Promise<AnticipationDecisionResult> {
+  const session = await requirePermission("appointments", "update");
+
+  try {
+    await assertCanActOnAppointment(session, appointmentId);
+
+    const result = await appointmentsService.rejectAnticipation(appointmentId, { userId: session.user.id });
+
+    revalidatePath("/admin/agendamentos");
+    revalidatePath("/perfil");
+
+    return { success: true, notification: { message: result.notification.message, whatsappLink: result.notification.whatsappLink } };
+  } catch (error) {
+    return { success: false, error: toActionErrorMessage(error) };
   }
 }

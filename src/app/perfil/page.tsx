@@ -10,6 +10,8 @@ import { Table, Tbody, Td, Th, Thead, Tr } from "@/components/ui/Table";
 import { auth, signOut } from "@/lib/auth";
 import { formatCurrency } from "@/lib/format/currency";
 import { paymentTypeLabels, subscriptionStatusLabels } from "@/lib/format/labels";
+import { CancelAppointmentButton } from "@/modules/appointments/CancelAppointmentButton";
+import { RequestAnticipationButton } from "@/modules/appointments/RequestAnticipationButton";
 import { appointmentsService } from "@/modules/appointments/service";
 import { customersService } from "@/modules/customers/service";
 
@@ -21,6 +23,17 @@ export default async function ProfilePage() {
     customersService.getProfile(session.user.customerId),
     appointmentsService.upcomingForCustomer(session.user.customerId),
   ]);
+
+  // Oportunidade de antecipação só faz sentido quando não há nada
+  // pendente/já aceito para este agendamento — recalculada a cada carga da
+  // página (nunca persistida como "disponível"; é sempre o estado atual).
+  const opportunities = await Promise.all(
+    upcomingAppointments.map((appointment) =>
+      appointment.anticipationStatus === "PENDING" || appointment.anticipationStatus === "ACCEPTED"
+        ? Promise.resolve(null)
+        : appointmentsService.findAnticipationOpportunityFor(appointment),
+    ),
+  );
 
   return (
     <div className="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-4 py-10">
@@ -72,13 +85,15 @@ export default async function ProfilePage() {
           <EmptyState title="Nenhum agendamento futuro" />
         ) : (
           <div className="flex flex-col gap-3">
-            {upcomingAppointments.map((appointment) => {
+            {upcomingAppointments.map((appointment, index) => {
               const wasRescheduled =
                 appointment.originalStartAt !== null &&
                 appointment.originalStartAt.getTime() !== appointment.startAt.getTime();
               const adjustedMinutes = wasRescheduled
                 ? Math.round((appointment.startAt.getTime() - appointment.originalStartAt!.getTime()) / 60_000)
                 : 0;
+              const wasAnticipated = appointment.anticipationStatus === "ACCEPTED";
+              const opportunity = opportunities[index];
 
               return (
                 <Card key={appointment.id}>
@@ -93,16 +108,51 @@ export default async function ProfilePage() {
                       </p>
                       {wasRescheduled ? (
                         <Badge tone="warning" className="mt-1">
-                          ⚠️ Horário alterado
+                          {wasAnticipated ? "✅ Horário antecipado" : "⚠️ Horário alterado"}
                         </Badge>
                       ) : null}
                     </div>
                   </div>
-                  {wasRescheduled ? (
+
+                  {wasRescheduled && wasAnticipated ? (
+                    <p className="mt-2 text-sm text-emerald-700">✅ Seu horário foi antecipado.</p>
+                  ) : wasRescheduled ? (
                     <p className="mt-2 text-sm text-amber-700">
                       Seu atendimento foi reajustado em {adjustedMinutes} minutos.
                     </p>
                   ) : null}
+
+                  {appointment.anticipationStatus === "PENDING" ? (
+                    <p className="mt-2 text-sm text-zinc-600">
+                      🕐 Solicitação de antecipação enviada. Aguardando o barbeiro.
+                    </p>
+                  ) : appointment.anticipationStatus === "REJECTED" ? (
+                    <p className="mt-2 text-sm text-zinc-600">
+                      Sua solicitação de antecipação não foi aprovada. Seu horário permanece às{" "}
+                      {format(appointment.startAt, "HH:mm", { locale: ptBR })}.
+                    </p>
+                  ) : opportunity ? (
+                    <div className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+                      <p className="text-sm font-medium text-emerald-800">
+                        🕐 Horário disponível às {format(opportunity.startAt, "HH:mm", { locale: ptBR })}
+                      </p>
+                      <p className="mt-1 text-xs text-emerald-700">
+                        Seu barbeiro tem um horário mais cedo livre. Você pode solicitar a antecipação — a decisão é
+                        sempre do barbeiro.
+                      </p>
+                      <div className="mt-2">
+                        <RequestAnticipationButton appointmentId={appointment.id} />
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="mt-3 border-t border-zinc-100 pt-3">
+                    <CancelAppointmentButton
+                      appointmentId={appointment.id}
+                      startAt={appointment.startAt.toISOString()}
+                      barberName={appointment.barber.name}
+                    />
+                  </div>
                 </Card>
               );
             })}

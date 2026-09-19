@@ -13,7 +13,7 @@ import { appointmentStatusLabels } from "@/lib/format/labels";
 import { can } from "@/lib/permissions/matrix";
 import { requirePermission } from "@/lib/permissions/guard";
 import { AppointmentForm } from "@/modules/appointments/AppointmentForm";
-import { cancelAppointmentAction } from "@/modules/appointments/actions";
+import { acceptAnticipationAction, cancelAppointmentAction, rejectAnticipationAction } from "@/modules/appointments/actions";
 import { InformarAtrasoButton } from "@/modules/appointments/InformarAtrasoButton";
 import { appointmentsService } from "@/modules/appointments/service";
 import { barbersService } from "@/modules/barbers/service";
@@ -57,6 +57,14 @@ export default async function AppointmentsPage({
       appointment.delayMinutes > 0 ||
       (appointment.originalStartAt !== null && appointment.originalStartAt.getTime() !== appointment.startAt.getTime()),
   );
+
+  // Já vem incluído em `appointments` (mesma consulta do dia) — sem query extra.
+  const pendingAnticipations = appointments.filter((appointment) => appointment.anticipationStatus === "PENDING");
+  const pendingByRequestedTime = new Map<string, typeof pendingAnticipations>();
+  for (const appointment of pendingAnticipations) {
+    const key = appointment.anticipationRequestedStartAt?.toISOString() ?? "";
+    pendingByRequestedTime.set(key, [...(pendingByRequestedTime.get(key) ?? []), appointment]);
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -104,6 +112,61 @@ export default async function AppointmentsPage({
         <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
           ⚠️ Agenda com atraso
         </div>
+      ) : null}
+
+      {pendingAnticipations.length > 0 ? (
+        <Card>
+          <h2 className="mb-3 text-sm font-semibold text-zinc-700">Solicitações de antecipação</h2>
+          <div className="flex flex-col gap-4">
+            {Array.from(pendingByRequestedTime.entries()).map(([requestedIso, group]) => (
+              <div key={requestedIso} className="rounded-lg border border-zinc-200 p-3">
+                {requestedIso ? (
+                  <p className="mb-2 text-sm font-medium text-zinc-700">
+                    Horário disponível: {format(new Date(requestedIso), "HH:mm", { locale: ptBR })}
+                  </p>
+                ) : null}
+                <div className="flex flex-col gap-2">
+                  {group.map((appointment) => (
+                    <div key={appointment.id} className="flex items-center justify-between rounded-lg bg-zinc-50 p-3">
+                      <div>
+                        <p className="text-sm font-medium text-zinc-900">{appointment.customer.name}</p>
+                        <p className="text-sm text-zinc-500">
+                          {format(appointment.startAt, "HH:mm", { locale: ptBR })}
+                          {" → "}
+                          {appointment.anticipationRequestedStartAt
+                            ? format(appointment.anticipationRequestedStartAt, "HH:mm", { locale: ptBR })
+                            : "?"}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <form
+                          action={async () => {
+                            "use server";
+                            await acceptAnticipationAction(appointment.id);
+                          }}
+                        >
+                          <Button type="submit" size="sm">
+                            Aceitar
+                          </Button>
+                        </form>
+                        <form
+                          action={async () => {
+                            "use server";
+                            await rejectAnticipationAction(appointment.id);
+                          }}
+                        >
+                          <Button type="submit" variant="secondary" size="sm">
+                            Recusar
+                          </Button>
+                        </form>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
       ) : null}
 
       {!targetBarberId ? (

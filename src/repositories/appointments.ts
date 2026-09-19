@@ -90,12 +90,189 @@ export const appointmentsRepository = {
     });
   },
 
+  /** Horários liberados (cancelados) do barbeiro no mesmo dia, antes de um horário de referência. */
+  findCancelledSlotsSameDay(barberId: string, day: Date, beforeStartAt: Date) {
+    return prisma.appointment.findMany({
+      where: { barberId, status: "CANCELLED", startAt: { gte: startOfDay(day), lt: beforeStartAt } },
+      orderBy: { startAt: "asc" },
+    });
+  },
+
   create(data: Prisma.AppointmentCreateInput) {
     return prisma.appointment.create({ data });
   },
 
+  /**
+   * Cancela o agendamento e, se havia uma solicitação de antecipação
+   * pendente NELE (o cliente pediu para antecipar este agendamento e
+   * desistiu ao cancelá-lo), invalida essa solicitação — regra 6: não pode
+   * ser aceita depois. Transação curta só para ler o estado atual antes de
+   * decidir se precisa tocar `anticipationStatus`.
+   */
   cancel(id: string) {
-    return prisma.appointment.update({ where: { id }, data: { status: "CANCELLED" } });
+    return prisma.$transaction(async (tx) => {
+      const appointment = await tx.appointment.findUnique({ where: { id } });
+      if (!appointment) throw new NotFoundError("Agendamento");
+
+      return tx.appointment.update({
+        where: { id },
+        data: {
+          status: "CANCELLED",
+          ...(appointment.anticipationStatus === "PENDING" ? { anticipationStatus: "CANCELLED" } : {}),
+        },
+      });
+    });
+  },
+
+  /** Solicitação de antecipação: o cliente só manifesta interesse — nada muda até o barbeiro decidir. */
+  requestAnticipation(params: { appointmentId: string; requestedStartAt: Date }) {
+    return prisma.appointment.update({
+      where: { id: params.appointmentId },
+      data: { anticipationStatus: "PENDING", anticipationRequestedStartAt: params.requestedStartAt },
+    });
+  },
+
+  /** O barbeiro recusa: mantém o horário original, só registra a decisão. */
+  async rejectAnticipation(params: { appointmentId: string; actorUserId: string | null }) {
+    return prisma.$transaction(async (tx) => {
+      const appointment = await tx.appointment.findUnique({
+        where: { id: params.appointmentId },
+        include: { customer: true, barber: true },
+      });
+      if (!appointment) throw new NotFoundError("Agendamento");
+      if (appointment.anticipationStatus !== "PENDING") {
+        throw new DomainError("Não há solicitação pendente para este agendamento");
+      }
+
+      const updated = await tx.appointment.update({
+        where: { id: appointment.id },
+        data: { anticipationStatus: "REJECTED" },
+      });
+
+      await recordAuditLog(
+        {
+          userId: params.actorUserId,
+          action: "ANTECIPACAO_RECUSADA",
+          entity: "Appointment",
+          entityId: appointment.id,
+          metadata: {
+            barberId: appointment.barberId,
+            barberName: appointment.barber.name,
+            customerId: appointment.customerId,
+            customerName: appointment.customer.name,
+            requestedStartAt: appointment.anticipationRequestedStartAt?.toISOString() ?? null,
+            keptStartAt: appointment.startAt.toISOString(),
+            keptEndAt: appointment.endAt.toISOString(),
+          },
+        },
+        tx,
+      );
+
+      return { appointment: updated, customer: appointment.customer };
+    });
+  },
+
+  /**
+   * O barbeiro aceita uma solicitação de antecipação: move o agendamento
+   * para o horário solicitado — só agora, nunca antes. Transacional pelo
+   * mesmo motivo do `applyDelay` (critério "tudo ou nada" + concorrência):
+   * revalida tudo com dados frescos dentro da transação, nunca confia em
+   * dados de uma tela já aberta. Duas aceitações concorrentes para o mesmo
+   * horário: a validação de sobreposição pega o caso comum, e o índice
+   * único parcial (barberId+startAt entre ativos) é a rede de segurança
+   * final contra corrida real — a segunda `update` falha com P2002.
+   */
+  async acceptAnticipation(params: { appointmentId: string; actorUserId: string | null }) {
+    return prisma.$transaction(async (tx) => {
+      const appointment = await tx.appointment.findUnique({
+        where: { id: params.appointmentId },
+        include: { customer: true, barber: true },
+      });
+      if (!appointment) throw new NotFoundError("Agendamento");
+      if (appointment.anticipationStatus !== "PENDING" || !appointment.anticipationRequestedStartAt) {
+        throw new DomainError("Não há solicitação pendente para este agendamento");
+      }
+
+      const newStartAt = appointment.anticipationRequestedStartAt;
+      const durationMs = appointment.endAt.getTime() - appointment.startAt.getTime();
+      const newEndAt = new Date(newStartAt.getTime() + durationMs);
+
+      const sameDayActive = await tx.appointment.findMany({
+        where: {
+          barberId: appointment.barberId,
+          status: { in: ACTIVE_STATUSES },
+          startAt: { gte: startOfDay(appointment.startAt), lte: endOfDay(appointment.startAt) },
+          id: { not: appointment.id },
+        },
+      });
+
+      const conflict = sameDayActive.some((other) => hasOverlap({ startAt: newStartAt, endAt: newEndAt }, other));
+      if (conflict) {
+        throw new DomainError("Este horário não está mais disponível.");
+      }
+
+      const updated = await tx.appointment.update({
+        where: { id: appointment.id },
+        data: {
+          startAt: newStartAt,
+          endAt: newEndAt,
+          anticipationStatus: "ACCEPTED",
+          originalStartAt: appointment.originalStartAt ?? appointment.startAt,
+          originalEndAt: appointment.originalEndAt ?? appointment.endAt,
+        },
+      });
+
+      // Outras solicitações pendentes do mesmo barbeiro/dia que pediam um
+      // horário que agora colide com o que acabou de ser ocupado ficam
+      // "indisponíveis" — reaproveitamos REJECTED, conforme autorizado pelo
+      // pedido como a solução mais simples (evita o barbeiro tentar aceitar
+      // algo que já não é mais possível).
+      const otherPending = await tx.appointment.findMany({
+        where: {
+          barberId: appointment.barberId,
+          status: { in: ACTIVE_STATUSES },
+          anticipationStatus: "PENDING",
+          id: { not: appointment.id },
+          startAt: { gte: startOfDay(appointment.startAt), lte: endOfDay(appointment.startAt) },
+        },
+      });
+
+      for (const other of otherPending) {
+        if (!other.anticipationRequestedStartAt) continue;
+        const otherDuration = other.endAt.getTime() - other.startAt.getTime();
+        const otherCandidateEnd = new Date(other.anticipationRequestedStartAt.getTime() + otherDuration);
+        if (hasOverlap({ startAt: other.anticipationRequestedStartAt, endAt: otherCandidateEnd }, { startAt: newStartAt, endAt: newEndAt })) {
+          await tx.appointment.update({ where: { id: other.id }, data: { anticipationStatus: "REJECTED" } });
+        }
+      }
+
+      await recordAuditLog(
+        {
+          userId: params.actorUserId,
+          action: "ANTECIPACAO_ACEITA",
+          entity: "Appointment",
+          entityId: appointment.id,
+          metadata: {
+            barberId: appointment.barberId,
+            barberName: appointment.barber.name,
+            customerId: appointment.customerId,
+            customerName: appointment.customer.name,
+            previousStartAt: appointment.startAt.toISOString(),
+            previousEndAt: appointment.endAt.toISOString(),
+            newStartAt: newStartAt.toISOString(),
+            newEndAt: newEndAt.toISOString(),
+          },
+        },
+        tx,
+      );
+
+      return {
+        appointment: updated,
+        customer: appointment.customer,
+        previousStartAt: appointment.startAt,
+        previousEndAt: appointment.endAt,
+      };
+    });
   },
 
   /**
@@ -159,10 +336,11 @@ export const appointmentsRepository = {
 
       const byId = new Map(sameDayActive.map((a) => [a.id, a]));
 
-      // Ordem DESCENDENTE de novo horário: como existe @@unique([barberId,
-      // startAt]), mover em ordem crescente pode colidir com o startAt antigo
-      // de quem ainda não migrou (ex.: atraso de +30min com slots de 30min
-      // back-to-back). Em ordem decrescente, cada slot-alvo já está livre.
+      // Ordem DESCENDENTE de novo horário: como existe um índice único
+      // parcial (barberId+startAt entre agendamentos ativos), mover em ordem
+      // crescente pode colidir com o startAt antigo de quem ainda não migrou
+      // (ex.: atraso de +30min com slots de 30min back-to-back). Em ordem
+      // decrescente, cada slot-alvo já está livre.
       const affectedDesc = [...simulation.affected].sort((a, b) => b.newStartAt.getTime() - a.newStartAt.getTime());
 
       for (const change of affectedDesc) {

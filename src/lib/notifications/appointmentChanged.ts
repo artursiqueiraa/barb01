@@ -53,3 +53,29 @@ export function notifyAppointmentChanged(input: AppointmentChangedInput): Appoin
     whatsappLink: buildWhatsAppLink(input.customerPhone, message),
   };
 }
+
+const ANTICIPATION_REJECTED_TEMPLATE =
+  "Olá, {{customerName}}!\n\n" +
+  "Seu pedido de antecipação não foi aprovado.\n\n" +
+  "Seu agendamento permanece às {{keptTime}}.\n\n" +
+  "Até breve! 💈";
+
+export interface AnticipationRejectedInput {
+  customerName: string;
+  customerPhone: string;
+  keptStartAt: Date;
+}
+
+/** Recusa de solicitação de antecipação: horário original é mantido, cliente é avisado (link wa.me manual, mesma ressalva do AGENDAMENTO_ALTERADO). */
+export function notifyAnticipationRejected(input: AnticipationRejectedInput): AppointmentChangedNotification {
+  const message = renderTemplate(ANTICIPATION_REJECTED_TEMPLATE, {
+    customerName: input.customerName,
+    keptTime: format(input.keptStartAt, "HH:mm", { locale: ptBR }),
+  });
+
+  return {
+    event: "AGENDAMENTO_ALTERADO",
+    message,
+    whatsappLink: buildWhatsAppLink(input.customerPhone, message),
+  };
+}
